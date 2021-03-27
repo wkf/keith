@@ -90,7 +90,7 @@
    2.0 2.0 1.5 1.0 2.5    2.5 1.0 1.5 2.0 2.0
    0.0                    0.0])
 
-(defn positional-penalty [[a & _]]
+(defn positional-penalty [[a]]
   (get position-penalties (:index a)))
 
 (defn abs [x] (Math/abs x))
@@ -219,40 +219,52 @@
     {:finger 0 :hand 1}))
 
 (def penalties
-  [positional-penalty
-   same-finger-penalty
-   long-jump-penalty
-   pinky-ring-twist-penalty
-   roll-out-penalty
-   roll-in-penalty
-   roll-reversal-penalty
-   long-twist-penalty
-   long-jump-sandwich-penalty
-   same-hand-penalty
-   alternate-hand-penalty])
+  {1 [positional-penalty]
+   2 [same-finger-penalty
+      long-jump-penalty
+      pinky-ring-twist-penalty
+      roll-out-penalty
+      roll-in-penalty]
+   3 [roll-reversal-penalty
+      long-twist-penalty
+      long-jump-sandwich-penalty]
+   4 [same-hand-penalty
+      alternate-hand-penalty]})
 
-(defn penalize [layout+ [ngram n]]
+(defn penalize-ngram [ngram n freq layout+]
   (let [ngram+ (map #(get layout+ %) ngram)]
-    (->> penalties (map #(* (or (% ngram+) 0.0) n)) (reduce +))))
+    (->>
+      (get penalties n)
+      (map #(* (or (% ngram+) 0.0) freq))
+      (reduce +))))
 
-(defn extract-ngrams [n corpus]
-  (frequencies
-    (map reverse
-      (concat
-        (for [i (range 1 (min (inc (count corpus)) n))]
-          (concat
-            (take (- n i) (repeat nil))
-            (take i corpus)))
-        (partition n 1 corpus)))))
+(defn extract-ngrams [corpus]
+  (let [n 4
+        quadgrams (map reverse
+                    (concat
+                      (for [i (range 1 (min (inc (count corpus)) n))]
+                        (concat
+                          (take (- n i) (repeat nil))
+                          (take i corpus)))
+                      (partition n 1 corpus)))]
+    {1 (frequencies (map #(take 1 %) quadgrams))
+     2 (frequencies (map #(take 2 %) quadgrams))
+     3 (frequencies (map #(take 3 %) quadgrams))
+     4 (frequencies quadgrams)}))
 
-(defn energy [ngrams layout]
+(defn energy [ngrams chars layout]
   (let [layout+ (->> layout
                   enrich-layout
                   index-layout)
         total (->> ngrams
-                (map (partial penalize layout+))
+                (mapcat
+                  (fn [[n freqs]]
+                    (map
+                      (fn [[ngram freq]]
+                        (penalize-ngram ngram n freq layout+))
+                      freqs)))
                 (reduce +))]
-    (/ total (count corpus))))
+    (/ total chars)))
 
 (defn simulate
   ([f g s0 t0 p0 k n]
@@ -264,7 +276,8 @@
            [r e] (if (< e+ e) [s e+] [r e])]
        (when (zero? (mod i 1000))
          (printf "simulation iteration: %d/%d" i n)
-         (print-layout r))
+         (print-layout r)
+         (flush))
        (if (< i n)
          (recur (inc i) s r e)
          r))))
@@ -280,9 +293,10 @@
          (if (< (rand) p) [s1 e1] [s0 e0]))))))
 
 (defn optimize-layout [layout corpus]
-  (let [ngrams (extract-ngrams 4 corpus)]
+  (let [chars (count corpus)
+        ngrams (extract-ngrams corpus)]
     (simulate
-      (partial energy ngrams)
+      (partial energy ngrams chars)
       shuffle-layout
       layout
       1.5
@@ -290,9 +304,46 @@
       10.0
       15000)))
 
+(def corpus-chars
+  (count corpus))
+
+(def corpus-ngrams
+  (extract-ngrams corpus))
+
+(def metamorphasis-chars
+  (count metamorphasis))
+
+(def metamorphasis-ngrams
+  (extract-ngrams metamorphasis))
+
 (comment
+
+  (use 'criterium.core)
+
+
+  (def moby-dick-chars
+    (count moby-dick))
+
+  (def moby-dick-ngrams
+    (extract-ngrams moby-dick))
+
+  (energy corpus-ngrams corpus-chars layout)
+
+  (with-progress-reporting
+    (quick-bench
+      (energy
+        metamorphasis-ngrams
+        metamorphasis-chars
+        layout)))
+  (with-progress-reporting
+    (quick-bench
+      (energy
+        moby-dick-ngrams
+        moby-dick-chars
+        layout)))
+
   (do
-    (extract-ngrams 4 metamorphasis)
+    (extract-ngrams metamorphasis)
     nil)
 
   (print-layout (optimize-layout layout corpus))
@@ -306,8 +357,8 @@
          (enrich-layout layout))
     \h)
 
-  (extract-ngrams 4 corpus)
-  (extract-ngrams 3 "bump bump")
+  (extract-ngrams corpus)
+  (extract-ngrams "bump bump")
 
   (rand-nth [|])
 
@@ -323,4 +374,4 @@
   (partition 4 1 nil "hi"))
 
 (defn -main [& _]
-  (optimize-layout layout metamorphasis))
+  (print-layout (optimize-layout layout metamorphasis)))
