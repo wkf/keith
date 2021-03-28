@@ -231,10 +231,10 @@
    4 [same-hand-penalty
       alternate-hand-penalty]})
 
-(defn penalize-ngram [ngram n freq layout+]
+(defn penalize-ngram [ngram freq layout+]
   (let [ngram+ (map #(get layout+ %) ngram)]
     (->>
-      (get penalties n)
+      (get penalties (count ngram))
       (map #(* (or (% ngram+) 0.0) freq))
       (reduce +))))
 
@@ -247,22 +247,20 @@
                           (take (- n i) (repeat nil))
                           (take i corpus)))
                       (partition n 1 corpus)))]
-    {1 (frequencies (map #(take 1 %) quadgrams))
-     2 (frequencies (map #(take 2 %) quadgrams))
-     3 (frequencies (map #(take 3 %) quadgrams))
-     4 (frequencies quadgrams)}))
+    (merge
+      (frequencies (map #(take 1 %) quadgrams))
+      (frequencies (map #(take 2 %) quadgrams))
+      (frequencies (map #(take 3 %) quadgrams))
+      (frequencies quadgrams))))
 
 (defn energy [ngrams chars layout]
   (let [layout+ (->> layout
                   enrich-layout
                   index-layout)
         total (->> ngrams
-                (mapcat
-                  (fn [[n freqs]]
-                    (map
-                      (fn [[ngram freq]]
-                        (penalize-ngram ngram n freq layout+))
-                      freqs)))
+                (pmap
+                  (fn [[ngram freq]]
+                    (penalize-ngram ngram freq layout+)))
                 (reduce +))]
     (/ total chars)))
 
