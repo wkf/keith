@@ -85,9 +85,9 @@
     nil))
 
 (def position-penalties
-  [3.0 1.0 1.0 1.5 3.0    3.0 1.5 1.0 1.0 3.0
-   0.5 0.5 0.0 0.0 1.5    1.5 0.0 0.0 0.5 0.5
-   2.0 2.0 1.5 1.0 2.5    2.5 1.0 1.5 2.0 2.0
+  [3.0 1.5 1.0 1.5 3.0    3.0 1.5 1.0 1.5 3.0
+   0.5 0.5 0.0 0.0 2.0    2.0 0.0 0.0 0.5 0.5
+   2.0 2.0 1.5 0.5 2.5    2.5 0.5 1.5 2.0 2.0
    0.0                    0.0])
 
 (defn positional-penalty [[a]]
@@ -128,7 +128,7 @@
   (and a b (same-hand? a b) (< (:finger a) (:finger b))))
 
 (defn same-finger-penalty [[a b & _]]
-  (when (and a b (same-finger? a b) (not (same-key? a b))) 5.0))
+  (when (and a b (same-hand? a b) (same-finger? a b) (not (same-key? a b))) 8.0))
 
 (defn long-jump-penalty [[a b & _]]
   (when (and a b (long-jump? a b))
