@@ -295,7 +295,7 @@
         ngrams (extract-ngrams corpus)]
     (simulate
       (partial energy ngrams chars)
-      shuffle-layout
+      (comp shuffle-layout shuffle-layout)
       layout
       1.5
       1.0
