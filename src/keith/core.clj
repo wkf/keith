@@ -1,5 +1,6 @@
 (ns keith.core
-  (:require [clojure.java.io :as io])
+  (:require [clojure.string :as str]
+            [clojure.java.io :as io])
   (:gen-class))
 
 (def short-sample "helloiamacorpusthankyousomuch!")
@@ -39,11 +40,14 @@
    \; \q \w \v \x    \b \h \k \j \l
    \space            \e])
 
-(def lock-thumbs-and-hjkl
+(def lock-thumbs-and-hkjl
   [1 1 1 1 1   1 1 1 1 1
    1 1 1 1 1   1 1 1 1 1
    1 1 1 1 1   1 0 0 0 0
    0           0])
+
+(def standard-params
+  {:t0 1.5 :p0 1.0 :k 10.0 :n 15000})
 
 (def map-layout
   (memoize
@@ -252,22 +256,25 @@
       (map #(* (or (% key) 0.0) freq))
       (reduce +))))
 
+(defn ensure-ngram-size [ngrams n]
+  (->> ngrams (map #(str/join (take n %))) (filter (comp #{n} count))))
+
 (def extract-ngrams
   (memoize
     (fn [corpus]
-      (let [n 4
+      (let [c (str/lower-case corpus)
+            n 4
             quadgrams (map reverse
                         (concat
-                          (for [i (range 1 (min (inc (count corpus)) n))]
-                            (concat
-                              (take (- n i) (repeat nil))
-                              (take i corpus)))
-                          (partition n 1 corpus)))]
-        (merge
-          (frequencies (map #(take 1 %) quadgrams))
-          (frequencies (map #(take 2 %) quadgrams))
-          (frequencies (map #(take 3 %) quadgrams))
-          (frequencies quadgrams))))))
+                          (for [i (range 1 (min (inc (count c)) n))]
+                            (take i c))
+                          (partition n 1 c)))]
+        (frequencies
+          (concat
+            (ensure-ngram-size quadgrams 1)
+            (ensure-ngram-size quadgrams 2)
+            (ensure-ngram-size quadgrams 3)
+            (ensure-ngram-size quadgrams 4)))))))
 
 (def evaluate-layout
   (memoize
@@ -323,37 +330,136 @@
     (shuffle-layout layout swaps)
     params))
 
-(def initial-params
-  {:t0 1.5 :p0 1.0 :k 10.0 :n 15000})
-
-(comment
-
-  (quot 9999 10)
-  (mod 9999 999)
-
-  (map-layout dvorakish columnar-5x3x1)
-
-  (shuffle swaps)
-
-  (print-layout
-    (shuffle-layout dvorakish lock-thumbs-and-hjkl))
-
-
-
-  (defn analyze-layout [layout ngrams]
-    (->> layout
-      enrich-layout
-      (group-by (juxt :hand :finger))
+(defn extract-chars-by [f mapping]
+  (into {}
+    (->> mapping vals
+      (group-by f)
       (map
         (fn [[k v]]
-          [k (map :key v)])))))
+          [k (map :char v)])))))
+
+(defn sum [xs] (reduce + xs))
+
+(defn average [total x] (* (float (/ x total)) 100))
+
+(def hands
+  {1 :left
+   2 :right})
+
+(def fingers
+  {0 :thumb
+   1 :index
+   2 :middle
+   3 :ring
+   4 :pinky})
+
+(defn analyze-chars [chars corpus]
+  (let [ngrams (extract-ngrams corpus)]
+    (->> chars (keep #(get ngrams (str %))) sum (average (count corpus)))))
+
+(defn analyze-hands [mapping corpus]
+  (into {}
+    (for [[hand chars] (extract-chars-by :hand mapping)]
+      [(get hands hand) (analyze-chars chars corpus)])))
+
+(defn analyze-fingers [mapping corpus]
+  (into {}
+    (for [[[hand finger] chars] (extract-chars-by (juxt :hand :finger) mapping)]
+      [[(get hands hand) (get fingers finger)] (analyze-chars chars corpus)])))
+
+(defn extract-bigrams [ngrams]
+  (->> ngrams
+    (filter (comp #{2} count key))
+    (filter (comp (partial apply not=) key))))
+
+(defn analyze-bigrams [mapping corpus]
+  (let [ngrams (extract-ngrams corpus)
+        bigrams (extract-bigrams ngrams)
+        total (->> bigrams (map val) sum)]
+    (->>
+      bigrams
+      (map (fn [[bigram freq]]
+             [bigram
+              (average total freq)
+              (->>
+                bigram
+                (keep #(get mapping %))
+                (map (juxt :hand :finger)))]))
+      (filter (fn [[_ _ [a b]]]
+                (and a b (= a b))))
+      (map (fn [[bigram freq [[hand finger] _]]]
+             [bigram freq (get hands hand) (get fingers finger)]))
+      (sort-by second >))))
+
+(defn analyze-layout [layout keyboard corpus]
+  (let [mapping (map-layout layout keyboard)]
+    {:hands (analyze-hands mapping corpus)
+     :fingers (analyze-fingers mapping corpus)
+     :bigrams (analyze-bigrams mapping corpus)}))
+
+(def analysis-template
+  "
+finger frequency
+
+          left         right
+
+pinky     %.6f%%    %.6f%%
+ring      %.6f%%    %.6f%%
+middle    %.6f%%    %.6f%%
+index     %.6f%%    %.6f%%
+thumb     %.6f%%    %.6f%%
+
+hand      %.6f%%    %.6f%%
+
+")
+
+(defn print-analysis [{:keys [hands fingers bigrams]}]
+  (apply printf analysis-template
+    (concat
+      (map #(get fingers %)
+        [[:left :pinky]
+         [:right :pinky]
+         [:left :ring]
+         [:right :ring]
+         [:left :middle]
+         [:right :middle]
+         [:left :index]
+         [:right :index]
+         [:left :thumb]
+         [:right :thumb]])
+      (map #(get hands %) [:left :right])))
+  (printf "top same finger bigrams\n")
+  (doseq [[bigram freq hand finger] (take 5 bigrams)]
+    (printf "%s %s %s %.6f%%\n" (name hand) (name finger) bigram freq)))
 
 (comment
-  (analyze-layout layout
-    corpus-ngrams
 
-    )
-  )
+  (analyze-layout dvorakish columnar-5x3x1 short-sample)
+  (analyze-layout dvorakish columnar-5x3x1 metamorphasis)
+
+
+  ;; / m u f z   x p g . q
+  ;; o d i s c   v n t a r
+  ;; e w , y ‘   b h k j l
+  ;;             ;
+  ;; / m u f z   x p g . q
+  ;; o d i s c   v n t a r
+  ;;                                       ; w , y ‘   b h k j l
+  ;; e
+
+
+  (print-analysis
+    (analyze-layout
+      dvorakish
+      columnar-5x3x1
+      metamorphasis
+      ))
+  (print-analysis
+    (analyze-layout
+      dvorakish
+      columnar-5x3x1
+      short-sample
+      )))
 
 
 (comment
@@ -363,9 +469,9 @@
   (optimize-layout
     dvorakish
     columnar-5x3x1
-    lock-thumbs-and-hjkl
+    lock-thumbs-and-hkjl
     short-sample
-    initial-params)
+    standard-params)
 
   (use 'criterium.core)
 
@@ -429,7 +535,7 @@
   (optimize-layout
     dvorakish
     columnar-5x3x1
-    lock-thumbs-and-hjkl
+    lock-thumbs-and-hkjl
     metamorphasis
-    initial-params)
+    standard-params)
   (shutdown-agents))
