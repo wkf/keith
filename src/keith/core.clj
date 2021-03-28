@@ -2,60 +2,95 @@
   (:require [clojure.java.io :as io])
   (:gen-class))
 
-(def corpus "helloiamacorpusthankyousomuch!")
-
-(def metamorphasis (slurp (io/resource "metamorphasis.txt")))
+(def short-sample "helloiamacorpusthankyousomuch!")
 (def moby-dick (slurp (io/resource "moby-dick.txt")))
+(def metamorphasis (slurp (io/resource "metamorphasis.txt")))
 
-(def layout
-  ["'" "," "." "/" "y"    "f" "g" "c" "r" "z"
-   "a" "o" "p" "u" "i"    "d" "m" "t" "n" "s"
-   ";" "q" "w" "v" "x"    "b" "h" "k" "j" "l"
-   " "                    "e"])
+(def columnar-5x3x1
+  {:hands
+   [1 1 1 1 1   2 2 2 2 2
+    1 1 1 1 1   2 2 2 2 2
+    1 1 1 1 1   2 2 2 2 2
+    1           2]
+   :fingers
+   [4 3 2 1 1   1 1 2 3 4
+    4 3 2 1 1   1 1 2 3 4
+    4 3 2 1 1   1 1 2 3 4
+    0           0]
+   :rows
+   [1 1 1 1 1   1 1 1 1 1
+    2 2 2 2 2   2 2 2 2 2
+    3 3 3 3 3   3 3 3 3 3
+    0           0]
+   :columns
+   [1 2 3 4 5   5 4 3 2 1
+    1 2 3 4 5   5 4 3 2 1
+    1 2 3 4 5   5 4 3 2 1
+    0           0]
+   :costs
+   [3.0 1.5 1.0 1.5 3.0    3.0 1.5 1.0 1.5 3.0
+    0.5 0.5 0.0 0.0 2.0    2.0 0.0 0.0 0.5 0.5
+    2.0 2.0 1.5 0.5 2.5    2.5 0.5 1.5 2.0 2.0
+    0.0                    0.0]})
 
-(def hands
-  [1 1 1 1 1   2 2 2 2 2
-   1 1 1 1 1   2 2 2 2 2
-   1 1 1 1 1   2 2 2 2 2
-   0           0])
+(def dvorakish
+  [\' \, \. \/ \y    \f \g \c \r \z
+   \a \o \p \u \i    \d \m \t \n \s
+   \; \q \w \v \x    \b \h \k \j \l
+   \space            \e])
 
-(def fingers
-  [4 3 2 1 1   1 1 2 3 4
-   4 3 2 1 1   1 1 2 3 4
-   4 3 2 1 1   1 1 2 3 4
-   0           0])
-
-(def rows
+(def lock-thumbs-and-hjkl
   [1 1 1 1 1   1 1 1 1 1
-   2 2 2 2 2   2 2 2 2 2
-   3 3 3 3 3   3 3 3 3 3
+   1 1 1 1 1   1 1 1 1 1
+   1 1 1 1 1   1 0 0 0 0
    0           0])
 
-(def columns
-  [1 2 3 4 5   5 4 3 2 1
-   1 2 3 4 5   5 4 3 2 1
-   1 2 3 4 5   5 4 3 2 1
-   0           0])
+(def map-layout
+  (memoize
+    (fn [layout {:keys [hands fingers rows columns costs]}]
+      (dissoc
+        (into {}
+          (map-indexed
+            (fn [i c]
+              [c
+               {:index i
+                :char c
+                :cost (get costs i)
+                :hand (get hands i)
+                :finger (get fingers i)
+                :row (get rows i)
+                :column (get columns i)}])
+            layout))
+        nil))))
 
-(defn mask [m]
-  (->> m (map-indexed (fn [i x] (and (pos? x) i))) (filter identity) vec))
+(def index-swaps
+  (memoize
+    (fn [m]
+      (->> m
+        (map-indexed
+          (fn [i x] (and (pos? x) i)))
+        (filter identity)
+        vec))))
 
-(def swaps
-  (mask
-    [1 1 1 1 1   1 1 1 1 1
-     1 1 1 1 1   1 1 1 1 1
-     1 1 1 1 1   1 0 0 0 0
-     0           0]))
-
-(defn shuffle-layout [layout]
-  (let [n (count swaps)
-        i (get swaps (rand-int n))
-        j (get swaps (rand-int n))]
+(defn swap-layout [layout swaps]
+  (let [s (index-swaps swaps)
+        n (count s)
+        i (get s (rand-int n))
+        j (get s (rand-int n))]
     (if (= i j)
-      (shuffle-layout layout)
+      (swap-layout layout swaps)
       (-> layout
         (assoc i (nth layout j))
         (assoc j (nth layout i))))))
+
+(defn shuffle-layout [layout swaps]
+  (->> swaps index-swaps shuffle
+    (map-indexed
+      (fn [i j] [i j]))
+    (reduce
+      (fn [l [i j]]
+        (assoc l i (nth layout j)))
+      layout)))
 
 (defn print-layout [layout]
   (apply printf
@@ -65,33 +100,10 @@
 %s %s %s %s %s   %s %s %s %s %s
         %s   %s
 "
-    layout))
+    layout)
+  (flush))
 
-(defn enrich-layout [layout]
-  (map-indexed
-    (fn [i key]
-      {:index i
-       :key (first key)
-       :hand (get hands i)
-       :finger (get fingers i)
-       :row (get rows i)
-       :column (get columns i)})
-    layout))
-
-(defn index-layout [layout]
-  (dissoc
-    (into {}
-      (for [x layout] [(:key x) x]))
-    nil))
-
-(def position-penalties
-  [3.0 1.5 1.0 1.5 3.0    3.0 1.5 1.0 1.5 3.0
-   0.5 0.5 0.0 0.0 2.0    2.0 0.0 0.0 0.5 0.5
-   2.0 2.0 1.5 0.5 2.5    2.5 0.5 1.5 2.0 2.0
-   0.0                    0.0])
-
-(defn positional-penalty [[a]]
-  (get position-penalties (:index a)))
+(defn positional-penalty [[a]] (:cost a))
 
 (defn abs [x] (Math/abs x))
 
@@ -135,6 +147,8 @@
     (+ 1.0
       (if (same-hand? a b)
         (cond
+          (thumb? a) 0.0
+          (thumb? b) 0.0
           (same-finger? a b) 10.0
           (and
             (index? a)
@@ -167,7 +181,7 @@
   (when (roll-out? a b) 0.125))
 
 (defn roll-in-penalty [[a b & _]]
-  (when (roll-in? a b) -0.125))
+  (when (roll-in? a b) -0.25))
 
 (defn roll-reversal-penalty [[a b c _]]
   (when (and a b (same-hand? a b c)
@@ -231,93 +245,133 @@
    4 [same-hand-penalty
       alternate-hand-penalty]})
 
-(defn penalize-ngram [ngram freq layout+]
-  (let [ngram+ (map #(get layout+ %) ngram)]
+(defn penalize-ngram [ngram freq mapping]
+  (let [key (map #(get mapping %) ngram)]
     (->>
       (get penalties (count ngram))
-      (map #(* (or (% ngram+) 0.0) freq))
+      (map #(* (or (% key) 0.0) freq))
       (reduce +))))
 
-(defn extract-ngrams [corpus]
-  (let [n 4
-        quadgrams (map reverse
-                    (concat
-                      (for [i (range 1 (min (inc (count corpus)) n))]
+(def extract-ngrams
+  (memoize
+    (fn [corpus]
+      (let [n 4
+            quadgrams (map reverse
                         (concat
-                          (take (- n i) (repeat nil))
-                          (take i corpus)))
-                      (partition n 1 corpus)))]
-    (merge
-      (frequencies (map #(take 1 %) quadgrams))
-      (frequencies (map #(take 2 %) quadgrams))
-      (frequencies (map #(take 3 %) quadgrams))
-      (frequencies quadgrams))))
+                          (for [i (range 1 (min (inc (count corpus)) n))]
+                            (concat
+                              (take (- n i) (repeat nil))
+                              (take i corpus)))
+                          (partition n 1 corpus)))]
+        (merge
+          (frequencies (map #(take 1 %) quadgrams))
+          (frequencies (map #(take 2 %) quadgrams))
+          (frequencies (map #(take 3 %) quadgrams))
+          (frequencies quadgrams))))))
 
-(defn energy [ngrams chars layout]
-  (let [layout+ (->> layout
-                  enrich-layout
-                  index-layout)
-        total (->> ngrams
-                (pmap
-                  (fn [[ngram freq]]
-                    (penalize-ngram ngram freq layout+)))
-                (reduce +))]
-    (/ total chars)))
+(def evaluate-layout
+  (memoize
+    (fn [layout keyboard corpus]
+      (let [mapping (map-layout layout keyboard)
+            total (->> corpus extract-ngrams
+                    (pmap
+                      (fn [[ngram freq]]
+                        (penalize-ngram ngram freq mapping)))
+                    (reduce +))]
+        (/ total (count corpus))))))
 
 (defn simulate
-  ([f g s0 t0 p0 k n]
+  ([energy-fn change-fn report-fn initial-state {:keys [n] :as params}]
    (loop [i 0
-          s s0
-          r s0
-          e (f s0)]
-     (let [[s e+] (simulate f g s t0 p0 k n i)
-           [r e] (if (< e+ e) [s e+] [r e])]
-       (when (zero? (mod i 1000))
-         (printf "simulation iteration: %d/%d" i n)
-         (print-layout r)
-         (flush))
+          current-state initial-state
+          optimal-state initial-state
+          optimal-energy (energy-fn initial-state)]
+     (let [[current-state current-energy]
+           (simulate energy-fn change-fn report-fn current-state i params)
+           [optimal-state optimal-energy]
+           (if (< current-energy optimal-energy)
+             [current-state current-energy]
+             [optimal-state optimal-energy])]
+       (report-fn current-state current-energy optimal-state optimal-energy n i)
        (if (< i n)
-         (recur (inc i) s r e)
-         r))))
-  ([f g s0 t0 p0 k n i]
-   (let [e0 (f s0)
-         s1 (g s0)
-         e1 (f s1)
-         de (- e1 e0)]
+         (recur (inc i) current-state optimal-state optimal-energy)
+         optimal-state))))
+  ([energy-fn change-fn report-fn current-state i {:keys [t0 p0 k n]}]
+   (let [current-energy (energy-fn current-state)
+         changed-state (change-fn current-state)
+         changed-energy (energy-fn changed-state)
+         de (- changed-energy current-energy)]
      (if (neg? de)
-       [s1 e1]
-       (let [t (Math/exp (- (/ (* i k) n)))
-             p (Math/exp (- (/ de t)))]
-         (if (< (rand) p) [s1 e1] [s0 e0]))))))
+       [changed-state changed-energy]
+       (let [t (* (Math/exp (- (/ (* i k) n))) t0)
+             p (* (Math/exp (- (/ de t))) p0)]
+         (if (< (rand) p)
+           [changed-state changed-energy]
+           [current-state current-energy]))))))
 
-(defn optimize-layout [layout corpus]
-  (let [chars (count corpus)
-        ngrams (extract-ngrams corpus)]
-    (simulate
-      (partial energy ngrams chars)
-      (comp shuffle-layout shuffle-layout)
-      layout
-      1.5
-      1.0
-      10.0
-      15000)))
+(defn optimize-layout [layout keyboard swaps corpus params]
+  (simulate
+    #(evaluate-layout % keyboard corpus)
+    (comp
+      #(swap-layout % swaps)
+      #(swap-layout % swaps))
+    (fn [_ _ layout cost n i]
+      (when (or (zero? (mod i (quot n 10))) (= i n))
+        (printf "simulation iteration: %d/%d\n" i n)
+        (printf "cost per character: %f\n" cost)
+        (print-layout layout)))
+    (shuffle-layout layout swaps)
+    params))
 
-(def corpus-chars
-  (count corpus))
-
-(def corpus-ngrams
-  (extract-ngrams corpus))
-
-(def metamorphasis-chars
-  (count metamorphasis))
-
-(def metamorphasis-ngrams
-  (extract-ngrams metamorphasis))
+(def initial-params
+  {:t0 1.5 :p0 1.0 :k 10.0 :n 15000})
 
 (comment
 
+  (quot 9999 10)
+  (mod 9999 999)
+
+  (map-layout dvorakish columnar-5x3x1)
+
+  (shuffle swaps)
+
+  (print-layout
+    (shuffle-layout dvorakish lock-thumbs-and-hjkl))
+
+
+
+  (defn analyze-layout [layout ngrams]
+    (->> layout
+      enrich-layout
+      (group-by (juxt :hand :finger))
+      (map
+        (fn [[k v]]
+          [k (map :key v)])))))
+
+(comment
+  (analyze-layout layout
+    corpus-ngrams
+
+    )
+  )
+
+
+(comment
+
+  (/ 15000 10)
+
+  (optimize-layout
+    dvorakish
+    columnar-5x3x1
+    lock-thumbs-and-hjkl
+    short-sample
+    initial-params)
+
   (use 'criterium.core)
 
+  (with-progress-reporting
+    (quick-bench
+      (extract-ngrams metamorphasis)))
 
   (def moby-dick-chars
     (count moby-dick))
@@ -372,4 +426,10 @@
   (partition 4 1 nil "hi"))
 
 (defn -main [& _]
-  (print-layout (optimize-layout layout metamorphasis)))
+  (optimize-layout
+    dvorakish
+    columnar-5x3x1
+    lock-thumbs-and-hjkl
+    metamorphasis
+    initial-params)
+  (shutdown-agents))
