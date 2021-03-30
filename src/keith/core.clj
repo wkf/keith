@@ -1,6 +1,10 @@
 (ns keith.core
-  (:require [clojure.string :as str]
-            [clojure.java.io :as io])
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]
+            [clojure.java.io :as io]
+            [clojure.data.json :as json]
+            [clojure.tools.cli :as cli])
+  (:import (java.awt.datatransfer DataFlavor StringSelection Transferable))
   (:gen-class))
 
 (def short-sample "helloiamacorpusthankyousomuch!")
@@ -44,6 +48,12 @@
   [1 1 1 1 1   1 1 1 1 1
    1 1 1 1 1   1 1 1 1 1
    1 1 1 1 1   1 0 0 0 0
+   0           0])
+
+(def lock-thumbs
+  [1 1 1 1 1   1 1 1 1 1
+   1 1 1 1 1   1 1 1 1 1
+   1 1 1 1 1   1 1 1 1 1
    0           0])
 
 (def standard-params
@@ -95,6 +105,35 @@
       (fn [l [i j]]
         (assoc l i (nth layout j)))
       layout)))
+
+(defn explore-layouts [layouts swaps depth]
+  (when-not (zero? depth)
+    (let [s (index-swaps swaps)
+          ls (for [l layouts
+                   i s
+                   j s :when (not= i j)]
+               (-> l
+                 (assoc i (nth l j))
+                 (assoc j (nth l i))))]
+      (lazy-cat ls (explore-layouts ls swaps (dec depth))))))
+
+(defn explore-layout [layout swaps depth]
+  (explore-layouts [layout] swaps depth))
+
+(comment
+
+  (print-layout dvorakish)
+
+  (print-layout
+    (first (drop 30 (explore-layout dvorakish lock-thumbs-and-hkjl 2))))
+
+  (print-layout
+    (count
+      (explore-layout dvorakish lock-thumbs-and-hkjl 2)))
+
+  (index-swaps lock-thumbs-and-hkjl)
+
+  )
 
 (defn print-layout [layout]
   (apply printf
@@ -276,16 +315,56 @@
             (ensure-ngram-size quadgrams 3)
             (ensure-ngram-size quadgrams 4)))))))
 
+(defn evaluate-ngrams [ngrams mapping total]
+  (/ (->> ngrams
+       (pmap
+         (fn [[ngram freq]]
+           (penalize-ngram ngram freq mapping)))
+       (reduce +))
+    total))
+
+(def extract-chars-by
+  (memoize
+    (fn [f mapping]
+      (into {}
+        (->> mapping vals
+          (group-by f)
+          (map
+            (fn [[k v]]
+              [k (map :char v)])))))))
+
+(defn div [total x] (/ x total))
+
+(defn imbalanced-chars-penalty [chars-by ngrams total]
+  (->>
+    (for [[_ chars] chars-by]
+      (/ (->> chars (keep #(get ngrams (str %))) (reduce +)) total))
+    (reduce -)
+    abs
+    (div 10)
+    (+ 1.0)))
+
+(defn imbalanced-hand-penalty [ngrams mapping total]
+  (imbalanced-chars-penalty (extract-chars-by :hand mapping) ngrams total))
+
+(defn imbalanced-finger-penalty [ngrams mapping total]
+  (reduce *
+    (for [[_ chars-by-finger] (group-by ffirst
+                                (extract-chars-by (juxt :finger :hand) mapping))]
+      (imbalanced-chars-penalty chars-by-finger ngrams total))))
+
+(defn evaluate-balance [ngrams mapping total]
+  (imbalanced-hand-penalty ngrams mapping total))
+
 (def evaluate-layout
   (memoize
     (fn [layout keyboard corpus]
       (let [mapping (map-layout layout keyboard)
-            total (->> corpus extract-ngrams
-                    (pmap
-                      (fn [[ngram freq]]
-                        (penalize-ngram ngram freq mapping)))
-                    (reduce +))]
-        (/ total (count corpus))))))
+            total (float (count corpus))
+            ngrams (extract-ngrams corpus)
+            ngram-score (evaluate-ngrams ngrams mapping total)
+            balance-factor (evaluate-balance ngrams mapping total)]
+        (* ngram-score balance-factor)))))
 
 (defn simulate
   ([energy-fn change-fn report-fn initial-state {:keys [n] :as params}]
@@ -316,31 +395,61 @@
            [changed-state changed-energy]
            [current-state current-energy]))))))
 
-(defn optimize-layout [layout keyboard swaps corpus params]
+(defn print-progress [_ _ layout score n i]
+  (when (or (not n) (zero? (mod i (quot n 10))) (= i n))
+    (if n
+      (printf "iteration: %d/%d\n" i n)
+      (printf "iteration: %d\n" i))
+    (printf "score: %f\n" score)
+    (print-layout layout)))
+
+(defn discover-layout [initial-layout keyboard swaps corpus params]
+  (println "discovering layout")
   (simulate
     #(evaluate-layout % keyboard corpus)
     (comp
       #(swap-layout % swaps)
       #(swap-layout % swaps))
-    (fn [_ _ layout cost n i]
-      (when (or (zero? (mod i (quot n 10))) (= i n))
-        (printf "simulation iteration: %d/%d\n" i n)
-        (printf "cost per character: %f\n" cost)
-        (print-layout layout)))
-    (shuffle-layout layout swaps)
+    print-progress
+    (shuffle-layout initial-layout swaps)
     params))
 
-(defn extract-chars-by [f mapping]
-  (into {}
-    (->> mapping vals
-      (group-by f)
-      (map
-        (fn [[k v]]
-          [k (map :char v)])))))
+(defn refine-layout [initial-layout keyboard swaps corpus depth]
+  (println "refining layout")
+  (loop [i 1
+         optimal-layout initial-layout
+         optimal-score (evaluate-layout initial-layout keyboard corpus)]
+    (print-progress optimal-layout optimal-score optimal-layout optimal-score nil i)
+    (if-let [[new-optimal-layout new-optimal-score]
+             (->>
+               (for [current-layout (explore-layout optimal-layout swaps 1)
+                     :let [current-score (evaluate-layout current-layout keyboard corpus)]
+                     :when (< current-score optimal-score)]
+                 [current-layout current-score])
+               (sort-by second)
+               first
+               not-empty)]
+      (if (< i depth)
+        (recur (inc i) new-optimal-layout new-optimal-score)
+        new-optimal-layout)
+      optimal-layout)))
 
-(defn sum [xs] (reduce + xs))
-
-(defn average [total x] (* (float (/ x total)) 100))
+(defn exhaust-layout [initial-layout keyboard swaps corpus depth]
+  (println "exhausting layout")
+  (let [layouts (explore-layout initial-layout swaps depth)
+        n (dec (count layouts))]
+    (->> layouts
+      (map-indexed
+        (fn [i layout]
+          [i layout (evaluate-layout layout keyboard corpus)]))
+      (reduce
+        (fn [[optimal-layout optimal-score] [i current-layout current-score]]
+          (print-progress current-layout current-score optimal-layout optimal-score n i)
+          (if (< current-score optimal-score)
+            [current-layout current-score]
+            [optimal-layout optimal-score]))
+        [initial-layout (evaluate-layout initial-layout keyboard corpus)])
+      first)))
 
 (def hands
   {1 :left
@@ -352,6 +461,10 @@
    2 :middle
    3 :ring
    4 :pinky})
+
+(defn sum [xs] (reduce + xs))
+
+(defn average [total x] (* (float (/ x total)) 100))
 
 (defn analyze-chars [chars corpus]
   (let [ngrams (extract-ngrams corpus)]
@@ -393,14 +506,14 @@
 
 (defn analyze-layout [layout keyboard corpus]
   (let [mapping (map-layout layout keyboard)]
-    {:hands (analyze-hands mapping corpus)
+    {:layout layout
+     :score (evaluate-layout layout keyboard corpus)
+     :hands (analyze-hands mapping corpus)
      :fingers (analyze-fingers mapping corpus)
      :bigrams (analyze-bigrams mapping corpus)}))
 
 (def analysis-template
   "
-finger frequency
-
           left         right
 
 pinky     %.6f%%    %.6f%%
@@ -413,7 +526,10 @@ hand      %.6f%%    %.6f%%
 
 ")
 
-(defn print-analysis [{:keys [hands fingers bigrams]}]
+(defn print-report [{:keys [layout score hands fingers bigrams] :as report}]
+  (println "reporting on layout")
+  (printf "score: %f\n" score)
+  (print-layout layout)
   (apply printf analysis-template
     (concat
       (map #(get fingers %)
@@ -430,48 +546,247 @@ hand      %.6f%%    %.6f%%
       (map #(get hands %) [:left :right])))
   (printf "top same finger bigrams\n")
   (doseq [[bigram freq hand finger] (take 5 bigrams)]
-    (printf "%s %s %s %.6f%%\n" (name hand) (name finger) bigram freq)))
+    (printf "%s %s %s %.6f%%\n" (name hand) (name finger) bigram freq))
+  (flush)
+  report)
+
+(defn spit-report! [report folder]
+  (let [time (System/currentTimeMillis)
+        file (str folder "/" time "-" (hash report) ".edn")]
+    (io/make-parents file)
+    (with-open [writer (io/writer file)]
+      (binding [*out* writer]
+        (pr (assoc report :time time))))))
+
+(defn slurp-reports [folder]
+  (->> folder io/file file-seq (filter #(.isFile %)) (map (comp edn/read-string slurp))))
+
+(defn ->clipboard [text]
+  (let [selection (StringSelection. text)]
+    (.setContents
+      (.getSystemClipboard (java.awt.Toolkit/getDefaultToolkit))
+      selection
+      selection)))
+
+(defn ->json [layout keyboard]
+  (let [mapping (map-layout layout keyboard)
+        shifted {\' \"
+                 \, \!
+                 \. \?
+                 \/ \@
+                 \y \Y
+                 \f \F
+                 \g \G
+                 \c \C
+                 \r \R
+                 \z \Z
+                 \a \A
+                 \o \O
+                 \p \P
+                 \u \U
+                 \i \I
+                 \d \D
+                 \m \M
+                 \t \T
+                 \n \N
+                 \s \S
+                 \; \:
+                 \q \Q
+                 \w \W
+                 \v \V
+                 \x \X
+                 \b \B
+                 \h \H
+                 \k \K
+                 \j \J
+                 \l \L
+                 \e \E}
+        numbers [\[ \7 \8 \9 \]  nil nil nil nil nil
+                 \\ \4 \5 \6 \-  nil nil nil nil nil
+                 \= \1 \2 \3 \`  nil nil nil nil nil
+                 \0              nil]
+        symbols [\{ \& \* \( \}  nil nil nil nil nil
+                 \< \$ \% \^ \>  nil nil nil nil nil
+                 \+ \| \_ \# \~  nil nil nil nil nil
+                 \)              nil]
+        ergodox [nil nil nil nil nil nil nil  nil nil nil nil nil nil nil
+                 nil 0   1   2   3   4   nil  nil 5   6   7   8   9   nil
+                 nil 10  11  12  13  14           15  16  17  18  19  nil
+                 nil 20  21  22  23  24  nil  nil 25  26  27  28  29  nil
+                 nil nil nil nil nil                  nil nil nil nil nil
+                 nil nil 30 nil nil nil           nil nil nil nil nil 31]
+        fingers [1  1  2  3  4  4  4   7  7  7  8  9  10 10
+                 1  1  2  3  4  4  4   7  7  7  8  9  10 10
+                 1  1  2  3  4  4         7  7  8  9  10 10
+                 1  1  2  3  4  4  4   7  7  7  8  9  10 10
+                 1  1  2  3  4               7  8  9  10 10
+                 5  5  5  5  5  5         6  6  6  6  6  6]]
+    (json/write-str
+      {:label "wkf"
+       :author "wkf"
+       :authorUrl ""
+       :fingerStart {"1" 29
+                     "2" 30
+                     "3" 31
+                     "4" 32
+                     "5" 66
+                     "6" 75
+                     "7" 35
+                     "8" 36
+                     "9" 37
+                     "10" 38
+                     "11" -1
+                     "false" -1}
+       :keyboardType "ergodox"
+       :labels {}
+       :keys (->
+               (map-indexed
+                 (fn [i j]
+                   (let [c (get layout j)]
+                     {:id i
+                      :finger
+                      (if-let [{:keys [hand finger]} (get mapping c)]
+                        (condp = [hand finger]
+                          [1 0] 5
+                          [1 1] 4
+                          [1 2] 3
+                          [1 3] 2
+                          [1 4] 1
+                          [2 0] 6
+                          [2 1] 7
+                          [2 2] 8
+                          [2 3] 9
+                          [2 4] 10)
+                        (get fingers i -1))
+                      :shift (if-let [s (get shifted c)] (int s) -1)
+                      :altGr (if-let [a (get numbers j)] (int a) -1)
+                      :shiftAltGr (if-let [a (get symbols j)] (int a) -1)
+                      :primary (if c (int c) -1)}))
+                 ergodox)
+               vec
+               (assoc-in [64 :primary] 17)
+               (assoc-in [65 :primary] 18)
+               (assoc-in [67 :primary] 8)
+               (assoc-in [70 :primary] -18)
+               (assoc-in [71 :primary] 17)
+               (assoc-in [20 :primary] 16)
+               (assoc-in [21 :primary] -16)
+               (assoc-in [74 :primary] 13))})))
+
+(def opts
+  [["-o" "--output OUTPUT" "output folder"
+    :default "reports"
+    :validate [#(.isDirectory (io/file %)) "must be a folder"]]
+   ["-r" "--rounds ROUNDS" "number of rounds"
+    :default 1
+    :parse-fn #(Integer/parseInt %)
+    :validate [pos? "must be a positive integer"]]
+   ["-c" "--corpus CORPUS" "name of corpus"
+    :default "metamorphasis.txt"
+    :validate [io/resource "must be a resource"]]
+   ["-h" "--help"]])
+
+(defn -main [& args]
+  (let [{:keys [options summary errors]} (cli/parse-opts args opts)]
+    (cond
+      (not-empty errors) (println errors)
+      (:help options) (println summary)
+      :else (let [rounds (:rounds options)
+                  output (:output options)
+                  corpus (slurp (io/resource (:corpus options)))
+                  layout dvorakish
+                  keyboard columnar-5x3x1
+                  swaps lock-thumbs
+                  depth 100]
+              (dotimes [_ rounds]
+                (-> layout
+                  (discover-layout keyboard swaps corpus standard-params)
+                  (refine-layout keyboard swaps corpus depth)
+                  (analyze-layout keyboard corpus)
+                  print-report
+                  (spit-report! output)))
+              (shutdown-agents)))))
 
 (comment
+
+  (.isDirectory (io/file (io/file "reports")))
+
+
+  (->
+    dvorakish
+    (analyze-layout columnar-5x3x1 short-sample)
+    (spit-report! "reports"))
+
+  (def reports (slurp-reports "reports"))
+
+  (first (sort-by :score reports))
+
+  (->clipboard
+    (->json
+      [\j
+       \g
+       \w
+       \p
+       \q
+       \/
+       \.
+       \f
+       \u
+       \'
+       \r
+       \l
+       \s
+       \t
+       \b
+       \,
+       \o
+       \n
+       \i
+       \h
+       \v
+       \k
+       \c
+       \d
+       \z
+       \x
+       \a
+       \m
+       \;
+       \y
+       \space
+       \e]
+      columnar-5x3x1))
+
+  4
+  7
+  9
+
+  (->
+    (sort-by :score reports)
+    vec
+    (nth 9)
+    :layout
+    (->json columnar-5x3x1)
+    ->clipboard)
+
+  (->clipboard (->json (:layout (second (sort-by :score reports))) columnar-5x3x1))
 
   (analyze-layout dvorakish columnar-5x3x1 short-sample)
   (analyze-layout dvorakish columnar-5x3x1 metamorphasis)
 
+  (print-report
+    (analyze-layout dvorakish columnar-5x3x1 short-sample))
 
-  ;; / m u f z   x p g . q
-  ;; o d i s c   v n t a r
-  ;; e w , y ‘   b h k j l
-  ;;             ;
-  ;; / m u f z   x p g . q
-  ;; o d i s c   v n t a r
-  ;;                                       ; w , y ‘   b h k j l
-  ;; e
+  (print-report
+    (analyze-layout dvorakish columnar-5x3x1 metamorphasis))
 
+  (refine-layout dvorakish columnar-5x3x1 lock-thumbs-and-hkjl short-sample 2)
 
-  (print-analysis
-    (analyze-layout
-      dvorakish
-      columnar-5x3x1
-      metamorphasis
-      ))
-  (print-analysis
-    (analyze-layout
-      dvorakish
-      columnar-5x3x1
-      short-sample
-      )))
-
-
-(comment
-
-  (/ 15000 10)
-
-  (optimize-layout
-    dvorakish
-    columnar-5x3x1
-    lock-thumbs-and-hkjl
-    short-sample
-    standard-params)
+  (-> dvorakish
+    (discover-layout columnar-5x3x1 lock-thumbs-and-hkjl short-sample standard-params)
+    (refine-layout columnar-5x3x1 lock-thumbs-and-hkjl short-sample 5)
+    (analyze-layout columnar-5x3x1 short-sample)
+    print-report)
 
   (use 'criterium.core)
 
@@ -479,63 +794,4 @@ hand      %.6f%%    %.6f%%
     (quick-bench
       (extract-ngrams metamorphasis)))
 
-  (def moby-dick-chars
-    (count moby-dick))
-
-  (def moby-dick-ngrams
-    (extract-ngrams moby-dick))
-
-  (energy corpus-ngrams corpus-chars layout)
-
-  (with-progress-reporting
-    (quick-bench
-      (energy
-        metamorphasis-ngrams
-        metamorphasis-chars
-        layout)))
-  (with-progress-reporting
-    (quick-bench
-      (energy
-        moby-dick-ngrams
-        moby-dick-chars
-        layout)))
-
-  (do
-    (extract-ngrams metamorphasis)
-    nil)
-
-  (print-layout (optimize-layout layout corpus))
-  (print-layout (optimize-layout layout metamorphasis)))
-
-(comment
-  (-> layout shuffle-layout print-layout)
-  (print-layout layout)
-
-  (get (index-layout
-         (enrich-layout layout))
-    \h)
-
-  (extract-ngrams corpus)
-  (extract-ngrams "bump bump")
-
-  (rand-nth [|])
-
-  (index-layout dvorak)
-
-  (apply println "hello")
-
-  (energy layout corpus)
-
-
-  (partition 4 1 il corpus)
-
-  (partition 4 1 nil "hi"))
-
-(defn -main [& _]
-  (optimize-layout
-    dvorakish
-    columnar-5x3x1
-    lock-thumbs-and-hkjl
-    metamorphasis
-    standard-params)
-  (shutdown-agents))
+  )
