@@ -183,7 +183,7 @@
   (and a b (same-hand? a b) (< (:finger a) (:finger b))))
 
 (defn same-finger-penalty [[a b & _]]
-  (when (and a b (same-hand? a b) (same-finger? a b) (not (same-key? a b))) 8.0))
+  (when (and a b (same-hand? a b) (same-finger? a b) (not (same-key? a b))) 10.0))
 
 (defn long-jump-penalty [[a b & _]]
   (when (and a b (long-jump? a b))
@@ -197,10 +197,12 @@
             (index? a)
             (bottom? a)
             (not (center? a))
-            (or (middle? b) (ring? b))) 0.0
-          (and (index? a) (ring? b)) 5.0
-          (and (ring? a) (index? b)) 5.0
-          (consecutive-fingers? a b) 5.0
+            (or (middle? b) (ring? b))) 5.0
+          (and (index? a) (ring? b)) 8.0
+          (and (ring? a) (index? b) (top? a)) 5.0
+          (and (middle? a) (pinky? b)) 8.0
+          (and (pinky? a) (middle? b)) 8.0
+          (consecutive-fingers? a b) 8.0
           :else 0.0)
         0.0))))
 
@@ -224,14 +226,14 @@
   (when (roll-out? a b) 0.125))
 
 (defn roll-in-penalty [[a b & _]]
-  (when (roll-in? a b) -0.25))
+  (when (roll-in? a b) -0.4))
 
 (defn roll-reversal-penalty [[a b c _]]
   (when (and a b (same-hand? a b c)
           (or
             (and (middle? a) (pinky? b) (ring? c))
             (and (ring? a) (pinky? b) (middle? c))))
-    20.0))
+    15.0))
 
 (defn long-twist-penalty [[a b c _]]
   (when (and a b c
@@ -354,7 +356,9 @@
       (imbalanced-chars-penalty chars-by-finger ngrams total))))
 
 (defn evaluate-balance [ngrams mapping total]
-  (imbalanced-hand-penalty ngrams mapping total))
+  (*
+    (imbalanced-hand-penalty ngrams mapping total)
+    (imbalanced-finger-penalty ngrams mapping total)))
 
 (def evaluate-layout
   (memoize
@@ -574,6 +578,7 @@ hand      %.6f%%    %.6f%%
                  \, \!
                  \. \?
                  \/ \@
+                 \- \_
                  \y \Y
                  \f \F
                  \g \G
@@ -602,12 +607,12 @@ hand      %.6f%%    %.6f%%
                  \l \L
                  \e \E}
         numbers [\[ \7 \8 \9 \]  nil nil nil nil nil
-                 \\ \4 \5 \6 \-  nil nil nil nil nil
+                 \\ \4 \5 \6 \/  nil nil nil nil nil
                  \= \1 \2 \3 \`  nil nil nil nil nil
                  \0              nil]
         symbols [\{ \& \* \( \}  nil nil nil nil nil
                  \< \$ \% \^ \>  nil nil nil nil nil
-                 \+ \| \_ \# \~  nil nil nil nil nil
+                 \+ \| \@ \# \~  nil nil nil nil nil
                  \)              nil]
         ergodox [nil nil nil nil nil nil nil  nil nil nil nil nil nil nil
                  nil 0   1   2   3   4   nil  nil 5   6   7   8   9   nil
@@ -719,43 +724,25 @@ hand      %.6f%%    %.6f%%
 
   (def reports (slurp-reports "reports"))
 
-  (first (sort-by :score reports))
+  (last (sort-by :time reports))
 
   (->clipboard
     (->json
-      [\j
-       \g
-       \w
-       \p
-       \q
-       \/
-       \.
-       \f
-       \u
-       \'
-       \r
-       \l
-       \s
-       \t
-       \b
-       \,
-       \o
-       \n
-       \i
-       \h
-       \v
-       \k
-       \c
-       \d
-       \z
-       \x
-       \a
-       \m
-       \;
-       \y
-       \space
-       \e]
+      [\z \f \w \g \' \j \v \. \b \/ \u \n \s \t \m \l \r \o \i \a \y \q \c \d \k \x \h \, \p \; \space \e]
       columnar-5x3x1))
+
+  (->clipboard
+    (->json
+      um
+      columnar-5x3x1))
+
+
+  (def um
+    [\- \. \u \m \q \k \f \c \g \j
+     \o \a \i \n \w \p \h \s \t \r
+     \' \, \y \l \x \v \d \b \z \;
+     \e \space])
+
 
   4
   7
@@ -765,6 +752,12 @@ hand      %.6f%%    %.6f%%
     (sort-by :score reports)
     vec
     (nth 9)
+    :layout
+    (->json columnar-5x3x1)
+    ->clipboard)
+  (->
+    (sort-by :time (slurp-reports "reports"))
+    last
     :layout
     (->json columnar-5x3x1)
     ->clipboard)
